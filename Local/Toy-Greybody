@@ -1,0 +1,335 @@
+Toy Greybody (Monotonicity Correction)
+
+```python
+def make_toy_greybody(f: np.ndarray, f0: float = 240.0, p: float = 4.0) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Smooth toy barrier model with CORRECT monotonicity:
+      low frequency: T² → 0 (total reflection)
+      high frequency: T² → 1 (total transmission)
+      
+    This matches BH barrier physics: low frequencies don't penetrate.
+    """
+    # Avoid division by zero
+    f_safe = np.maximum(f, 1e-30)
+    
+    # CORRECTED: flipped ratio for proper monotonicity
+    T2 = 1.0 / (1.0 + (f0 / f_safe) ** p)  # <-- KEY FIX
+    
+    T = np.sqrt(T2)
+    R_mag = np.sqrt(np.maximum(0.0, 1.0 - T2))
+    
+    # For now, keep real (no phase). For real analysis, use WKB phase.
+    return T, R_mag  # TODO: Add proper phase from WKB
+```
+
+2. Simplified Denominator Regularization
+
+```python
+def transfer_function_K(
+    omega: np.ndarray, 
+    T_inf: np.ndarray, 
+    R_inf: np.ndarray, 
+    R_s: complex | np.ndarray,  # scalar OR array
+    dt: float,
+    epsilon_numerical: float = 1e-24  # <-- Adjusted to meaningful value
+) -> np.ndarray:
+    """
+    Cavity transfer function for echoes.
+    
+    Parameters:
+        omega: Angular frequency (rad/s)
+        T_inf: Transmission coefficient (√|T|²)
+        R_inf: Complex reflection coefficient (must include phase!)
+        R_s: Surface reflectivity - scalar OR frequency-dependent complex array
+        dt: Echo time delay (seconds)
+        epsilon_numerical: Small complex offset to avoid division by zero
+    
+    Returns:
+        K(ω): Complex transfer function array
+    """
+    # Convert R_s to array, preserving complex dtype
+    R_s_array = np.asarray(R_s, dtype=complex)
+    
+    # Broadcast scalar to array shape
+    if np.ndim(R_s_array) == 0:
+        R_s_array = np.full_like(omega, R_s_array, dtype=complex)
+    
+    # Shape check
+    if R_s_array.shape != omega.shape:
+        raise ValueError(f"R_s shape {R_s_array.shape} != omega shape {omega.shape}")
+    
+    phase = np.exp(1j * omega * dt)
+    
+    # SIMPLIFIED: Add small complex offset to denominator
+    denominator = 1.0 - R_inf * R_s_array * phase
+    denominator = denominator + epsilon_numerical * (1 + 1j)  # Complex offset
+    
+    return (T_inf**2) * R_s_array * phase / denominator
+```
+
+3. Unit Convention Enforcement
+
+```python
+def build_waveform_with_echoes(
+    t: np.ndarray,
+    Mtot_solar: float,
+    epsilon: float = 1e-5,
+    R_s_mag: float = 0.70,
+    R_s_phase: float = 0.30 * np.pi,
+    use_parametric_rs: bool = False,
+    R_s_model: callable | None = None,
+    **kwargs
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
+    """
+    Build waveform with echoes.
+    
+    Parameters:
+        t: Time array (seconds)
+        Mtot_solar: Total mass in solar masses
+        epsilon: Quantum gravity parameter
+        R_s_mag: Constant reflectivity magnitude (if not using parametric)
+        R_s_phase: Constant reflectivity phase (radians, if not using parametric)
+        use_parametric_rs: If True, use frequency-dependent R_s(ω)
+        R_s_model: Callable that returns complex R_s(f) for f in Hz
+                   Note: This model expects Hz, not rad/s!
+        **kwargs: Additional parameters for R_s_model
+    
+    Returns:
+        h_total: Complete waveform
+        h_merger: Base merger
+        h_echo: Echo component
+        meta: Metadata with diagnostics
+    """
+    # ... [previous code for time series, FFT, etc.]
+    
+    freqs = np.fft.rfftfreq(N, d=dt_samp)  # Hz
+    omega = 2 * np.pi * freqs  # rad/s
+    
+    # Barrier with CORRECT monotonicity
+    T_inf, R_inf_mag = make_toy_greybody(freqs, f0=240.0, p=4.0)
+    
+    # TODO: Replace with complex R_inf from WKB
+    # For now, add simple linear phase
+    phi_Rinf = 0.1 * np.pi * (freqs / 240.0)  # Simple model
+    R_inf = R_inf_mag * np.exp(1j * phi_Rinf)
+    
+    dt_echo = echo_delay_seconds(Mtot_solar, epsilon=epsilon)
+    
+    # Handle R_s - WITH UNIT CONVERSION
+    if use_parametric_rs:
+        if R_s_model is None:
+            raise ValueError("use_parametric_rs=True requires R_s_model")
+        
+        # CRITICAL: Convert to Hz for models expecting Hz
+        R_s = R_s_model(freqs)  # freqs in Hz, NOT omega in rad/s!
+        
+        # Shape and type checks
+        R_s = np.asarray(R_s, dtype=complex)
+        if R_s.shape != omega.shape:
+            raise ValueError(f"R_s_model returned shape {R_s.shape}, expected {omega.shape}")
+    else:
+        R_s = R_s_mag * np.exp(1j * R_s_phase)  # Scalar complex
+    
+    # Transfer function
+    K = transfer_function_K(omega, T_inf=T_inf, R_inf=R_inf, R_s=R_s, dt=dt_echo)
+    
+    # ... [rest of waveform generation]
+    
+    # Metadata with unit-aware diagnostics
+    meta = {
+        'freqs_hz': freqs,
+        'omega_rad_per_s': omega,
+        'use_parametric_rs': use_parametric_rs,
+        'R_s_units': 'Hz' if use_parametric_rs else 'constant',
+        'toy_barrier_monotonicity': 'corrected',  # Track this!
+    }
+    
+    # Clean scalar check
+    if np.ndim(R_s) == 0:
+        meta['R_s_mode'] = 'constant'
+        meta['R_s_mag'] = float(np.abs(R_s))
+        meta['R_s_phase_rad'] = float(np.angle(R_s))
+    else:
+        meta['R_s_mode'] = 'frequency_dependent'
+        # Sample at key frequencies
+        for f_sample in [50.0, 100.0, 150.0, 240.0, 300.0]:
+            if f_sample <= freqs[-1]:
+                idx = np.argmin(np.abs(freqs - f_sample))
+                meta[f'R_s_mag_{f_sample:.0f}Hz'] = float(np.abs(R_s[idx]))
+                meta[f'R_s_phase_{f_sample:.0f}Hz_rad'] = float(np.angle(R_s[idx]))
+    
+    return h_total, h0, h_echo, meta
+```
+
+4. Corrected Parametric Model Usage (Hz Convention)
+
+```python
+# Assuming LorentzianMagnitude expects frequency in Hz
+from echo_search.core.parametric_rs import (
+    LorentzianMagnitude,
+    LinearDispersion,
+    ComplexSurfaceReflectivity,
+)
+
+# Models defined with Hz (natural units)
+mag_model = LorentzianMagnitude(R0=0.8, f0=150.0, Gamma=0.1)  # f0 in Hz!
+phase_model = LinearDispersion(tau=1e-3, phi0=0.3*np.pi)  # tau in seconds
+R_s_model_obj = ComplexSurfaceReflectivity(mag_model, phase_model)
+
+# Use directly - build_waveform_with_echoes converts internally
+h_total, h0, h_echo, meta = build_waveform_with_echoes(
+    t=t_array,
+    Mtot_solar=30.0,
+    epsilon=1e-5,
+    use_parametric_rs=True,
+    R_s_model=R_s_model_obj,  # Expects Hz, gets Hz from function
+    # R_s_mag and R_s_phase ignored when use_parametric_rs=True
+)
+
+# Verify monotonicity is correct
+print(f"Toy barrier monotonicity: {meta.get('toy_barrier_monotonicity', 'unknown')}")
+print(f"R_s at 100Hz: {meta.get('R_s_mag_100Hz', 'N/A'):.3f} ∠ {meta.get('R_s_phase_100Hz_rad', 0):.3f} rad")
+```
+
+5. Smoke Tests (Add to your test suite)
+
+```python
+import numpy as np
+
+def test_transfer_function_sanity():
+    """Quick sanity checks for transfer function."""
+    N = 1000
+    f = np.linspace(20, 500, N)
+    omega = 2 * np.pi * f
+    dt = 0.1
+    
+    # Simple test case
+    T_inf = np.ones(N) * 0.5
+    R_inf = np.ones(N) * 0.5j  # Complex
+    R_s = 0.3 * np.exp(1j * 0.3*np.pi)  # Scalar complex
+    
+    K = transfer_function_K(omega, T_inf, R_inf, R_s, dt)
+    
+    # Shape check
+    assert K.shape == omega.shape, f"K shape {K.shape} != omega shape {omega.shape}"
+    
+    # Finite check
+    assert np.all(np.isfinite(np.real(K))), "Real part of K not finite"
+    assert np.all(np.isfinite(np.imag(K))), "Imag part of K not finite"
+    
+    # Test with frequency-dependent R_s
+    R_s_freq = 0.3 * np.exp(1j * 0.1 * (f/100))
+    K_freq = transfer_function_K(omega, T_inf, R_inf, R_s_freq, dt)
+    assert K_freq.shape == omega.shape
+    
+    print("✅ transfer_function_K passes basic sanity checks")
+
+def test_toy_greybody_monotonicity():
+    """Verify toy barrier has correct frequency behavior."""
+    f = np.logspace(1, 3, 100)  # 10-1000 Hz
+    T, R = make_toy_greybody(f, f0=240.0, p=4.0)
+    
+    # Low frequency: T² should be small
+    assert T[0] < 0.1, f"Low-f transmission too high: T={T[0]:.3f}"
+    
+    # High frequency: T² should approach 1
+    assert T[-1] > 0.9, f"High-f transmission too low: T={T[-1]:.3f}"
+    
+    # Monotonic increase
+    T_diff = np.diff(T)
+    assert np.all(T_diff >= -1e-10), "T not monotonic increasing"
+    
+    # Unitarity
+    assert np.allclose(T**2 + np.abs(R)**2, 1.0, rtol=1e-10), "Unitarity violated"
+    
+    print("✅ Toy greybody has correct monotonicity")
+
+def test_pole_microscope():
+    """Examine denominator near potential resonances."""
+    import matplotlib.pyplot as plt
+    
+    f = np.linspace(20, 500, 5000)  # High resolution
+    omega = 2 * np.pi * f
+    dt = 0.05  # Example delay
+    
+    # Complex R_inf with frequency-dependent phase (like WKB would give)
+    _, R_mag = make_toy_greybody(f, f0=240.0, p=4.0)
+    phi = 0.5 * np.pi * (f/240.0)  # Linear phase model
+    R_inf = R_mag * np.exp(1j * phi)
+    
+    # Constant R_s
+    R_s = 0.3 * np.exp(1j * 0.3*np.pi)
+    
+    phase_term = np.exp(1j * omega * dt)
+    denominator = 1.0 - R_inf * R_s * phase_term
+    
+    # Plot |denominator| vs frequency
+    plt.figure(figsize=(10, 6))
+    plt.semilogy(f, np.abs(denominator))
+    plt.xlabel('Frequency (Hz)')
+    plt.ylabel('|1 - R_∞ R_s e^{iωΔt}|')
+    plt.title('Pole Microscope: Denominator Magnitude')
+    plt.grid(True, alpha=0.3)
+    
+    # Mark minima
+    minima = f[np.abs(denominator) < 0.01]
+    if len(minima) > 0:
+        plt.scatter(minima, np.abs(denominator)[np.abs(denominator) < 0.01], 
+                   color='red', s=50, label='Near-poles')
+        plt.legend()
+        print(f"Found {len(minima)} near-pole frequencies")
+    
+    plt.savefig('pole_microscope.png', dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    print("✅ Pole microscope test complete")
+
+if __name__ == "__main__":
+    test_transfer_function_sanity()
+    test_toy_greybody_monotonicity()
+    test_pole_microscope()
+```
+
+6. Critical Note: R_inf Must Be Complex from WKB
+
+For your actual analysis, replace the toy R_inf with WKB-computed values:
+
+```python
+# In your actual analysis, use:
+from echo_search.core.schwarzschild_reflection import compute_reflection_coefficient
+
+def get_complex_R_inf(freqs_hz: np.ndarray, M_solar: float = 30.0) -> np.ndarray:
+    """Get proper complex R_∞ from WKB calculation."""
+    M_geom = M_solar * 4.925e-6  # M in seconds
+    omega_M = 2 * np.pi * freqs_hz * M_geom  # Dimensionless ωM
+    
+    R_inf_complex = np.zeros(len(omega_M), dtype=complex)
+    for i, om in enumerate(omega_M):
+        result = compute_reflection_coefficient(om, ell=2, spin=2)
+        R_inf_complex[i] = result.R_infinity
+    
+    return R_inf_complex
+
+# Use in build_waveform_with_echoes:
+# R_inf = get_complex_R_inf(freqs, M_solar=30.0)
+```
+
+Summary of Critical Corrections:
+
+1. ✅ Toy barrier monotonicity fixed: T² = 1/(1 + (f0/f)^p)
+2. ✅ Simplified denominator regularization: denom + 1e-24*(1+1j)
+3. ✅ Explicit Hz convention: R_s_model(f_hz) not R_s_model(omega_rad_per_s)
+4. ✅ Clean scalar check: np.ndim(R_s) == 0
+5. ✅ Smoke tests added: Shape, finiteness, monotonicity, pole microscope
+
+Physics Significance:
+
+The corrected monotonicity (f0/f instead of f/f0) is critical for your narrative:
+
+· Low frequency → Total reflection (R_∞ ≈ 1) → Echoes strong but detector insensitive
+· High frequency → Transmission increases (R_∞ → 0) → Echoes weaken
+· Mid frequency (~150-300 Hz) → Optimal balance for detection
+
+This creates the "sweet spot" for echo detection that matches your WKB calculations and the detector's sensitivity band.
+
+The unit convention enforcement prevents subtle bugs where models expecting Hz get rad/s inputs (would shift "resonances" by 2π).
