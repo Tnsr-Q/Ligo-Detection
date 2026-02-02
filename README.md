@@ -1,19 +1,4 @@
-README
-LIGO ECHO DETECTION SYTEM WITH MERLIN SUITE AND REALTIME VISUALIZATION 
-## ###################################
-This comprehensive system integrates:
 
-
-
-1. Full SNR projection with realistic LIGO/Virgo noise curves
-2. Template generation with corrected Schwarzschild reflection physics
-3. Detection statistics with false alarm rates and significance
-4. Complete pipeline for end-to-end analysis
-5. Schwarzschild reflection calculator for accurate R_∞(ω)
-6. Corrected transfer function with proper monotonicity
-7. Merlin test suite (results-only version) - call print_results() to see only test outputs
-8. Unified interface for both simulation and real data
-9. Command-line interface for easy operation
 ****VISUALIZation
 
 1. WebSocket streaming for real-time data
