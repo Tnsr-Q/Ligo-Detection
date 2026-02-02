@@ -1,0 +1,1115 @@
+[[[[[[[[[[[[[- **WebGL** GPU ]]]]]]]]]]
+
+- Flask/FastAPI Backend + Three.js WebGL Frontend
+
+1. Backend Architecture (FastAPI):
+
+```python
+# app/api.py - FastAPI Backend
+from fastapi import FastAPI, WebSocket, BackgroundTasks
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+import asyncio
+import json
+import numpy as np
+from echo_detection_system import EchoDetectionSystem
+
+app = FastAPI(title="Echo Detection WebGL System")
+
+# CORS for web frontend
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# WebSocket connections
+connections = []
+
+@app.websocket("/ws/simulation")
+async def websocket_simulation(websocket: WebSocket):
+    await websocket.accept()
+    connections.append(websocket)
+    
+    try:
+        while True:
+            data = await websocket.receive_json()
+            
+            if data["type"] == "run_simulation":
+                # Run simulation in background
+                system = EchoDetectionSystem()
+                results = system.run_simulation(
+                    detector=data.get("detector", "aLIGO"),
+                    n_templates=data.get("n_templates", 100)
+                )
+                
+                # Send progress updates
+                await websocket.send_json({
+                    "type": "progress",
+                    "stage": "complete",
+                    "results": results
+                })
+                
+                # Generate WebGL data
+                gl_data = prepare_webgl_data(results)
+                await websocket.send_json({
+                    "type": "webgl_data",
+                    "data": gl_data
+                })
+                
+    except Exception as e:
+        print(f"WebSocket error: {e}")
+    finally:
+        connections.remove(websocket)
+
+@app.post("/api/simulation")
+async def run_simulation(params: dict):
+    """REST endpoint for simulation"""
+    system = EchoDetectionSystem()
+    results = system.run_simulation(**params)
+    
+    # Convert numpy arrays to lists for JSON
+    def convert_for_json(obj):
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        if isinstance(obj, np.generic):
+            return obj.item()
+        return obj
+    
+    return JSONResponse({
+        "status": "success",
+        "data": json.loads(json.dumps(results, default=convert_for_json))
+    })
+
+def prepare_webgl_data(results):
+    """Prepare data for WebGL visualization"""
+    # Extract waveform data
+    waveforms = []
+    if results.get("candidates"):
+        for candidate in results["candidates"][:10]:  # Limit to 10
+            waveform = {
+                "id": candidate["template_hash"],
+                "points": [],
+                "metadata": candidate["template_params"]
+            }
+            
+            # Sample waveform for WebGL
+            t = np.linspace(0, 4, 1000)
+            # Generate waveform points (simplified)
+            waveform["points"] = [[x, np.sin(x * 10) * 0.5, 0] for x in t]
+            
+            waveforms.append(waveform)
+    
+    return {
+        "waveforms": waveforms,
+        "detector": results.get("detector"),
+        "statistics": results.get("detection_statistics", {})
+    }
+
+# Mount static files for frontend
+app.mount("/", StaticFiles(directory="static", html=True), name="static")
+```
+
+2. Frontend with Three.js WebGL:
+
+```html
+<!-- static/index.html -->
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Echo Detection WebGL System</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.min.js"></script>
+    <style>
+        body { margin: 0; overflow: hidden; }
+        #ui {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background: rgba(0,0,0,0.7);
+            color: white;
+            padding: 15px;
+            border-radius: 5px;
+            font-family: monospace;
+        }
+    </style>
+</head>
+<body>
+    <div id="ui">
+        <h3>Echo Detection System</h3>
+        <button onclick="runSimulation()">Run Simulation</button>
+        <div id="status">Ready</div>
+    </div>
+    
+    <script>
+        // WebGL Scene Setup
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+        
+        const controls = new THREE.OrbitControls(camera, renderer.domElement);
+        camera.position.z = 5;
+        
+        // WebSocket connection
+        const ws = new WebSocket(`ws://${window.location.host}/ws/simulation`);
+        
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            
+            if (data.type === "progress") {
+                document.getElementById("status").innerHTML = 
+                    `Progress: ${data.stage}`;
+            }
+            
+            if (data.type === "webgl_data") {
+                visualizeWaveforms(data.data);
+            }
+        };
+        
+        function runSimulation() {
+            ws.send(JSON.stringify({
+                type: "run_simulation",
+                detector: "aLIGO",
+                n_templates: 100
+            }));
+            document.getElementById("status").innerHTML = "Running...";
+        }
+        
+        function visualizeWaveforms(data) {
+            // Clear previous waveforms
+            scene.children.slice().forEach(child => {
+                if (child.userData.isWaveform) scene.remove(child);
+            });
+            
+            // Create new waveforms
+            data.waveforms.forEach((waveform, idx) => {
+                const points = [];
+                
+                waveform.points.forEach((point, i) => {
+                    points.push(new THREE.Vector3(
+                        point[0] - 2,  // X position
+                        point[1] + idx * 1.5,  // Y position (stack waveforms)
+                        point[2]  // Z position
+                    ));
+                });
+                
+                const geometry = new THREE.BufferGeometry().setFromPoints(points);
+                const material = new THREE.LineBasicMaterial({ 
+                    color: 0x00ff00,
+                    linewidth: 2
+                });
+                
+                const line = new THREE.Line(geometry, material);
+                line.userData = { isWaveform: true, metadata: waveform.metadata };
+                scene.add(line);
+                
+                // Add labels
+                const label = createLabel(`M=${waveform.metadata.Mtot}`, idx);
+                scene.add(label);
+            });
+        }
+        
+        function createLabel(text, yOffset) {
+            const canvas = document.createElement('canvas');
+            const context = canvas.getContext('2d');
+            canvas.width = 256;
+            canvas.height = 128;
+            
+            context.fillStyle = 'rgba(0,0,0,0.8)';
+            context.fillRect(0, 0, 256, 128);
+            context.font = '24px Arial';
+            context.fillStyle = 'white';
+            context.fillText(text, 10, 40);
+            
+            const texture = new THREE.CanvasTexture(canvas);
+            const material = new THREE.SpriteMaterial({ map: texture });
+            const sprite = new THREE.Sprite(material);
+            
+            sprite.position.set(-2, yOffset * 1.5, 0);
+            sprite.scale.set(2, 1, 1);
+            
+            return sprite;
+        }
+        
+        // Animation loop
+        function animate() {
+            requestAnimationFrame(animate);
+            controls.update();
+            renderer.render(scene, camera);
+        }
+        animate();
+    </script>
+</body>
+</html>
+```
+
+3. Docker Deployment for WebGL System:
+
+```dockerfile
+# Dockerfile
+FROM python:3.9-slim
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    libhdf5-dev \
+    libopenblas-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements and install
+COPY src/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install fastapi uvicorn[standard]
+
+# Copy application
+COPY src/echo_detection_system.py .
+COPY app/api.py .
+COPY static/ ./static/
+
+# Create missing static directory if needed
+RUN mkdir -p static
+
+EXPOSE 8000
+
+CMD ["uvicorn", "app.api:app", "--host", "0.0.0.0", "--port", "8000"]
+```
+
+4. Deployment Options:
+
+Option A: Heroku/Render (Simplest)
+
+```yaml
+# render.yaml
+services:
+  - type: web
+    name: echo-detection-webgl
+    env: python
+    buildCommand: pip install -r src/requirements.txt
+    startCommand: uvicorn app.api:app --host 0.0.0.0 --port $PORT
+```
+
+Option B: AWS/GCP with GPU Support
+
+```python
+# For WebGL acceleration on cloud
+import boto3
+
+class CloudEchoSystem:
+    def __init__(self):
+        self.s3 = boto3.client('s3')
+        self.lambda_client = boto3.client('lambda')
+        
+    def run_cloud_simulation(self, params):
+        """Run simulation on AWS Lambda with GPU"""
+        response = self.lambda_client.invoke(
+            FunctionName='echo-detection-gpu',
+            Payload=json.dumps(params)
+        )
+        return json.loads(response['Payload'].read())
+```
+
+5. Real-time Dashboard with Plotly/Dash:
+
+```python
+# dashboard.py
+import dash
+from dash import dcc, html
+from dash.dependencies import Input, Output, State
+import plotly.graph_objs as go
+import numpy as np
+from echo_detection_system import EchoDetectionSystem
+
+app = dash.Dash(__name__)
+
+app.layout = html.Div([
+    html.H1("Echo Detection Real-time Dashboard"),
+    
+    dcc.Tabs([
+        dcc.Tab(label='3D Visualization', children=[
+            dcc.Graph(id='3d-waveform'),
+            dcc.Interval(id='3d-update', interval=1000)
+        ]),
+        
+        dcc.Tab(label='Parameter Space', children=[
+            dcc.Graph(id='parameter-space'),
+            html.Div([
+                dcc.Slider(id='mass-slider', min=10, max=100, value=30, step=5),
+                dcc.Slider(id='epsilon-slider', min=-6, max=-3, value=-5, step=0.1)
+            ])
+        ]),
+        
+        dcc.Tab(label='Merlin Tests', children=[
+            html.Div(id='merlin-results'),
+            dcc.Dropdown(
+                id='test-selector',
+                options=[{'label': f'Test {i}', 'value': i} for i in range(1, 11)],
+                multi=True,
+                value=[1, 2, 3]
+            )
+        ])
+    ])
+])
+
+@app.callback(
+    Output('3d-waveform', 'figure'),
+    [Input('3d-update', 'n_intervals')]
+)
+def update_3d_plot(n):
+    # Generate 3D waveform data
+    system = EchoDetectionSystem()
+    results = system.run_simulation(n_templates=50)
+    
+    fig = go.Figure(data=[
+        go.Scatter3d(
+            x=np.random.randn(100),
+            y=np.random.randn(100),
+            z=np.random.randn(100),
+            mode='lines',
+            line=dict(color='cyan', width=3)
+        )
+    ])
+    
+    fig.update_layout(
+        scene=dict(
+            xaxis_title='Time (s)',
+            yaxis_title='Frequency (Hz)',
+            zaxis_title='Amplitude'
+        )
+    )
+    
+    return fig
+
+if __name__ == '__main__':
+    app.run_server(debug=True, port=8050)
+```
+
+6. WebAssembly Option for Browser-Based Processing:
+
+```python
+# For compiling Python to WebAssembly using Pyodide
+"""
+Use Pyodide to run Python directly in browser:
+1. Load Pyodide in browser
+2. Transfer code to WebAssembly
+3. Run simulations client-side
+"""
+
+# In your HTML:
+"""
+<script type="module">
+    import { loadPyodide } from "https://cdn.jsdelivr.net/pyodide/v0.21.3/full/pyodide.js";
+    
+    async function loadEchoSystem() {
+        const pyodide = await loadPyodide();
+        
+        // Load required packages
+        await pyodide.loadPackage(["numpy", "scipy"]);
+        
+        // Load echo detection code
+        const response = await fetch('/src/echo_detection_system.py');
+        const code = await response.text();
+        
+        // Run in browser
+        pyodide.runPython(code);
+        
+        // Now you can call Python functions from JavaScript
+        const result = pyodide.runPython(`
+            system = EchoDetectionSystem()
+            results = system.run_simulation(n_templates=50)
+            results
+        `);
+        
+        console.log("Browser-based simulation complete:", result);
+    }
+    
+    loadEchoSystem();
+</script>
+```
+
+————————————————————-
+
+WebGL/Web-based echo detection with realtime visualizer 
+___
+1. Real-time Visualization in WebGL (No Files)
+
+```html
+<!-- webgl_visualizer.html -->
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Echo Detection - Real-time WebGL Viewer</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.min.js"></script>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: Arial; }
+        #results-panel {
+            position: absolute; top: 10px; left: 10px; 
+            background: rgba(0,0,0,0.85); color: white; 
+            padding: 15px; border-radius: 10px;
+            width: 350px; max-height: 90vh; overflow-y: auto;
+            box-shadow: 0 0 20px rgba(0,255,255,0.3);
+        }
+        .result-item { margin: 10px 0; padding: 8px; background: rgba(255,255,255,0.1); }
+    </style>
+</head>
+<body>
+    <!-- WebGL Canvas (No file output needed!) -->
+    <canvas id="webgl-canvas"></canvas>
+    
+    <!-- Results Panel - Updates in real-time -->
+    <div id="results-panel">
+        <h3>📊 Real-time Echo Detection Results</h3>
+        <div id="live-results">
+            <div class="result-item" id="status">Status: Waiting for simulation...</div>
+            <div class="result-item" id="candidates">Candidates found: 0</div>
+            <div class="result-item" id="best-snr">Best SNR: --</div>
+            <div class="result-item" id="mass-estimate">Mass estimate: -- M☉</div>
+            <div class="result-item" id="frequency-range">Frequency range: -- Hz</div>
+            <div class="result-item" id="detection-confidence">Confidence: --%</div>
+        </div>
+        
+        <!-- Interactive Controls -->
+        <div style="margin-top: 20px;">
+            <button onclick="runSimulation()">▶ Run Simulation</button>
+            <button onclick="exportToJSON()">💾 Export Results (Optional)</button>
+        </div>
+        
+        <!-- Real-time Charts -->
+        <div id="charts-container" style="margin-top: 20px;">
+            <canvas id="snr-chart" width="320" height="150"></canvas>
+            <canvas id="frequency-chart" width="320" height="150"></canvas>
+        </div>
+    </div>
+
+    <script>
+        // Initialize Three.js WebGL scene
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ canvas: document.getElementById('webgl-canvas'), antialias: true });
+        
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setClearColor(0x0a0a1a);
+        
+        // WebSocket connection to backend (no files needed!)
+        const ws = new WebSocket(`ws://${window.location.hostname}:8000/ws/results`);
+        
+        // Store results in memory (no file needed!)
+        let simulationResults = {
+            candidates: [],
+            waveforms: [],
+            statistics: {},
+            metadata: {}
+        };
+        
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            
+            // Update results in memory
+            simulationResults = data;
+            
+            // Update UI directly
+            updateResultsPanel(data);
+            
+            // Visualize in WebGL
+            visualizeInWebGL(data);
+            
+            // Update charts
+            updateCharts(data);
+        };
+        
+        function updateResultsPanel(data) {
+            document.getElementById('status').innerHTML = `Status: ${data.status || 'Complete'}`;
+            document.getElementById('candidates').innerHTML = `Candidates found: ${data.candidates?.length || 0}`;
+            document.getElementById('best-snr').innerHTML = `Best SNR: ${data.best_candidate?.snr?.toFixed(2) || '--'}`;
+            document.getElementById('mass-estimate').innerHTML = `Mass estimate: ${data.best_candidate?.Mtot?.toFixed(1) || '--'} M☉`;
+            document.getElementById('frequency-range').innerHTML = `Frequency range: ${data.f_range?.[0] || '--'} - ${data.f_range?.[1] || '--'} Hz`;
+            document.getElementById('detection-confidence').innerHTML = `Confidence: ${data.confidence?.toFixed(1) || '--'}%`;
+        }
+        
+        function visualizeInWebGL(data) {
+            // Clear previous visualizations
+            scene.children.slice().forEach(child => {
+                if (child.userData.isWaveform) scene.remove(child);
+            });
+            
+            // Create 3D waveform visualization (no file needed!)
+            if (data.waveforms && data.waveforms.length > 0) {
+                data.waveforms.forEach((waveform, idx) => {
+                    const points = [];
+                    waveform.data.forEach((point, i) => {
+                        points.push(new THREE.Vector3(
+                            i * 0.01,                    // X: time
+                            point * 5,                   // Y: amplitude
+                            idx * 2                      // Z: waveform index
+                        ));
+                    });
+                    
+                    const geometry = new THREE.BufferGeometry().setFromPoints(points);
+                    const material = new THREE.LineBasicMaterial({ 
+                        color: waveform.color || 0x00ff00,
+                        linewidth: 2 
+                    });
+                    
+                    const line = new THREE.Line(geometry, material);
+                    line.userData = { isWaveform: true, metadata: waveform.metadata };
+                    scene.add(line);
+                });
+            }
+        }
+        
+        function updateCharts(data) {
+            // Update SNR distribution chart
+            const snrCtx = document.getElementById('snr-chart').getContext('2d');
+            if (window.snrChart) window.snrChart.destroy();
+            
+            window.snrChart = new Chart(snrCtx, {
+                type: 'bar',
+                data: {
+                    labels: data.snr_distribution?.bins || [],
+                    datasets: [{
+                        label: 'SNR Distribution',
+                        data: data.snr_distribution?.counts || [],
+                        backgroundColor: 'rgba(0, 255, 255, 0.5)'
+                    }]
+                }
+            });
+        }
+        
+        function runSimulation() {
+            // Send request to backend via WebSocket (no file needed!)
+            ws.send(JSON.stringify({
+                action: 'run_simulation',
+                parameters: {
+                    detector: 'aLIGO',
+                    n_templates: 100,
+                    frequency_range: [20, 500]
+                }
+            }));
+            
+            document.getElementById('status').innerHTML = 'Status: Running simulation...';
+        }
+        
+        function exportToJSON() {
+            // OPTIONAL: Only if user wants to save
+            const dataStr = JSON.stringify(simulationResults, null, 2);
+            const dataUri = 'data:application/json;charset=utf-8,'+ encodeURIComponent(dataStr);
+            
+            const exportFileDefaultName = `echo_results_${Date.now()}.json`;
+            
+            const linkElement = document.createElement('a');
+            linkElement.setAttribute('href', dataUri);
+            linkElement.setAttribute('download', exportFileDefaultName);
+            linkElement.click();
+        }
+        
+        // Animation loop
+        function animate() {
+            requestAnimationFrame(animate);
+            renderer.render(scene, camera);
+        }
+        animate();
+    </script>
+</body>
+</html>
+```
+
+[[[[[[2. Backend That Streams Results (No File Writing)
+
+```python
+# backend_no_files.py
+from fastapi import FastAPI, WebSocket
+from fastapi.middleware.cors import CORSMiddleware
+import json
+import numpy as np
+from echo_detection_system import EchoDetectionSystem
+import asyncio
+
+app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.websocket("/ws/results")
+async def websocket_results(websocket: WebSocket):
+    await websocket.accept()
+    
+    while True:
+        # Wait for simulation request
+        data = await websocket.receive_json()
+        
+        if data["action"] == "run_simulation":
+            # Run simulation WITHOUT saving files
+            system = EchoDetectionSystem()
+            
+            # Send progress updates
+            await websocket.send_json({
+                "status": "simulation_started",
+                "progress": 0
+            })
+            
+            # Run pipeline but DON'T save results to file
+            # Instead, stream results directly
+            results = system.pipeline.run_search(
+                data_segment=None,  # Generate simulated data
+                data_fs=4096.0
+            )
+            
+            # Convert results to JSON-serializable format
+            def numpy_to_list(obj):
+                if isinstance(obj, np.ndarray):
+                    return obj.tolist()
+                if isinstance(obj, np.generic):
+                    return obj.item()
+                return obj
+            
+            # Stream results directly to WebSocket
+            await websocket.send_json({
+                "status": "complete",
+                "candidates": results.get("candidates", []),
+                "best_candidate": results.get("candidates", [{}])[0] if results.get("candidates") else {},
+                "f_range": results.get("search_parameters", {}).get("f_range", [20, 500]),
+                "confidence": calculate_confidence(results),
+                "waveforms": extract_waveform_data(results),  # Send waveform data directly
+                "snr_distribution": {
+                    "bins": list(range(0, 30, 2)),
+                    "counts": generate_snr_distribution(results)
+                },
+                "metadata": {
+                    "timestamp": results.get("timestamp"),
+                    "detector": results.get("detector"),
+                    "n_templates": results.get("search_parameters", {}).get("n_templates", 0)
+                }
+            })
+            
+            # Optionally: Store in memory for session (still no file!)
+            # session_results[websocket.id] = results
+
+def extract_waveform_data(results):
+    """Extract waveform data for WebGL visualization"""
+    waveforms = []
+    
+    if "candidates" in results and len(results["candidates"]) > 0:
+        # Take top 3 candidates for visualization
+        for i, candidate in enumerate(results["candidates"][:3]):
+            # Generate or extract waveform data
+            waveform = {
+                "id": candidate.get("template_hash", f"waveform_{i}"),
+                "data": generate_waveform_points(candidate),  # Simplified waveform
+                "color": ["#00ff00", "#00ffff", "#ff00ff"][i % 3],
+                "metadata": candidate.get("template_params", {})
+            }
+            waveforms.append(waveform)
+    
+    return waveforms
+
+def generate_waveform_points(candidate):
+    """Generate sample waveform points"""
+    # In reality, you'd use the actual waveform data
+    t = np.linspace(0, 4, 1000)
+    Mtot = candidate.get("template_params", {}).get("Mtot", 30)
+    freq = 100 / Mtot  # Scale frequency by mass
+    
+    waveform = np.sin(2 * np.pi * freq * t) * np.exp(-t/2)
+    return waveform.tolist()
+
+def calculate_confidence(results):
+    """Calculate detection confidence"""
+    candidates = results.get("candidates", [])
+    if not candidates:
+        return 0.0
+    
+    snrs = [c.get("snr", 0) for c in candidates]
+    max_snr = max(snrs)
+    
+    # Simple confidence calculation
+    if max_snr > 12:
+        return 95.0
+    elif max_snr > 8:
+        return 75.0
+    elif max_snr > 5:
+        return 50.0
+    else:
+        return 25.0
+
+def generate_snr_distribution(results):
+    """Generate SNR distribution for chart"""
+    # Mock distribution - in reality, use actual SNR values
+    return [10, 25, 50, 75, 90, 80, 65, 40, 20, 10, 5, 2, 1, 0, 0]
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+```
+
+3. Complete In-Browser System (No Backend Files)
+
+```html
+<!-- browser_only.html - Everything in browser, no files! -->
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Echo Detection - Pure Browser Version</title>
+    <script src="https://cdn.jsdelivr.net/pyodide/v0.23.4/full/pyodide.js"></script>
+    <script src="https://cdn.plot.ly/plotly-2.18.2.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <style>
+        body { margin: 20px; font-family: Arial; background: #0f0f1a; color: white; }
+        .container { display: grid; grid-template-columns: 300px 1fr; gap: 20px; }
+        .control-panel { background: #1a1a2e; padding: 20px; border-radius: 10px; }
+        .result-panel { background: #1a1a2e; padding: 20px; border-radius: 10px; }
+        .webgl-container { width: 100%; height: 500px; background: #000; }
+        button { background: #00ccff; border: none; padding: 10px 20px; margin: 5px; cursor: pointer; }
+    </style>
+</head>
+<body>
+    <h1>🌌 Echo Detection - Pure Browser Implementation</h1>
+    <div class="container">
+        <div class="control-panel">
+            <h3>Controls</h3>
+            <div>
+                <label>Mass (M☉):</label>
+                <input type="range" id="mass-slider" min="10" max="100" value="30">
+                <span id="mass-value">30</span>
+            </div>
+            <div>
+                <label>Detector:</label>
+                <select id="detector-select">
+                    <option>aLIGO</option>
+                    <option>LIGO_O3</option>
+                    <option>Virgo</option>
+                </select>
+            </div>
+            <button onclick="runInBrowser()">🚀 Run in Browser</button>
+            <button onclick="visualizeResults()">🎨 Visualize</button>
+            
+            <div id="browser-status" style="margin-top: 20px; padding: 10px; background: #222; border-radius: 5px;">
+                Status: Ready
+            </div>
+        </div>
+        
+        <div class="result-panel">
+            <h3>📈 Live Results</h3>
+            <div id="live-results"></div>
+            <div class="webgl-container" id="webgl-viewer"></div>
+            <div id="plotly-charts" style="margin-top: 20px;"></div>
+        </div>
+    </div>
+
+    <script>
+        let pyodide;
+        let simulationResults = {};
+        
+        // Initialize Pyodide (Python in browser)
+        async function initializePyodide() {
+            document.getElementById('browser-status').innerHTML = 'Loading Python runtime...';
+            
+            pyodide = await loadPyodide({
+                indexURL: "https://cdn.jsdelivr.net/pyodide/v0.23.4/full/"
+            });
+            
+            // Load numpy and other packages
+            await pyodide.loadPackage(["numpy", "micropip"]);
+            
+            // Import our echo detection code (simplified version)
+            const echoCode = `
+import numpy as np
+
+def run_echo_simulation(Mtot=30.0, detector='aLIGO', n_templates=50):
+    """Simplified echo simulation running in browser"""
+    # Simulate data (no file I/O)
+    np.random.seed(42)
+    t = np.linspace(0, 4, 4096)
+    
+    # Generate mock waveform
+    freq = 100 / Mtot
+    h_imr = np.sin(2 * np.pi * freq * t) * np.exp(-t/2)
+    
+    # Add mock echo
+    dt = 0.05 * Mtot
+    h_echo = 0.3 * np.sin(2 * np.pi * freq * (t - dt)) * np.exp(-(t-dt)/2.5)
+    h_echo[t < dt] = 0
+    
+    h_total = h_imr + h_echo
+    
+    # Mock matched filtering results
+    snr_values = np.random.exponential(scale=2, size=n_templates)
+    best_snr = np.max(snr_values)
+    
+    return {
+        "waveform": h_total.tolist(),
+        "snr_values": snr_values.tolist(),
+        "best_snr": float(best_snr),
+        "candidates": [
+            {"snr": best_snr, "Mtot": Mtot, "confidence": min(100, best_snr * 10)}
+        ] if best_snr > 5 else [],
+        "detector": detector,
+        "parameters": {
+            "Mtot": Mtot,
+            "n_templates": n_templates
+        }
+    }
+            `;
+            
+            pyodide.runPython(echoCode);
+            document.getElementById('browser-status').innerHTML = 'Python runtime ready!';
+        }
+        
+        // Run simulation entirely in browser
+        async function runInBrowser() {
+            const mass = document.getElementById('mass-slider').value;
+            const detector = document.getElementById('detector-select').value;
+            
+            document.getElementById('browser-status').innerHTML = 'Running simulation in browser...';
+            
+            // Call Python function running in browser
+            const runSim = pyodide.globals.get("run_echo_simulation");
+            simulationResults = runSim(Mtot=parseFloat(mass), detector=detector);
+            
+            // Convert to JavaScript object
+            simulationResults = simulationResults.toJs();
+            
+            // Display results
+            displayResults();
+            
+            document.getElementById('browser-status').innerHTML = 'Simulation complete!';
+        }
+        
+        function displayResults() {
+            const resultsDiv = document.getElementById('live-results');
+            resultsDiv.innerHTML = `
+                <h4>Results:</h4>
+                <p>Detector: ${simulationResults.detector}</p>
+                <p>Total Mass: ${simulationResults.parameters.Mtot} M☉</p>
+                <p>Best SNR: ${simulationResults.best_snr.toFixed(2)}</p>
+                <p>Candidates found: ${simulationResults.candidates.length}</p>
+                ${simulationResults.candidates.length > 0 ? 
+                  `<p>Detection confidence: ${simulationResults.candidates[0].confidence.toFixed(1)}%</p>` : 
+                  '<p>No significant candidates detected</p>'}
+            `;
+            
+            // Create Plotly chart
+            Plotly.newPlot('plotly-charts', [{
+                y: simulationResults.waveform.slice(0, 1000),
+                type: 'scatter',
+                mode: 'lines',
+                line: {color: '#00ff00'}
+            }], {
+                title: 'Waveform (First 1000 samples)',
+                paper_bgcolor: '#1a1a2e',
+                plot_bgcolor: '#1a1a2e',
+                font: {color: 'white'}
+            });
+        }
+        
+        function visualizeResults() {
+            if (!simulationResults.waveform) return;
+            
+            // Create WebGL visualization
+            const container = document.getElementById('webgl-viewer');
+            const scene = new THREE.Scene();
+            const camera = new THREE.PerspectiveCamera(75, container.clientWidth/container.clientHeight, 0.1, 1000);
+            const renderer = new THREE.WebGLRenderer({ antialias: true });
+            
+            renderer.setSize(container.clientWidth, container.clientHeight);
+            container.innerHTML = '';
+            container.appendChild(renderer.domElement);
+            
+            // Create waveform geometry
+            const points = [];
+            const waveform = simulationResults.waveform;
+            const step = Math.floor(waveform.length / 1000); // Downsample
+            
+            for (let i = 0; i < waveform.length; i += step) {
+                points.push(new THREE.Vector3(
+                    i * 0.001,           // X position
+                    waveform[i] * 10,    // Y position (amplitude)
+                    0                     // Z position
+                ));
+            }
+            
+            const geometry = new THREE.BufferGeometry().setFromPoints(points);
+            const material = new THREE.LineBasicMaterial({ color: 0x00ff00, linewidth: 2 });
+            const line = new THREE.Line(geometry, material);
+            scene.add(line);
+            
+            camera.position.z = 5;
+            
+            function animate() {
+                requestAnimationFrame(animate);
+                line.rotation.y += 0.001;
+                renderer.render(scene, camera);
+            }
+            animate();
+        }
+        
+        // Update mass display
+        document.getElementById('mass-slider').addEventListener('input', function() {
+            document.getElementById('mass-value').innerHTML = this.value;
+        });
+        
+        // Initialize on page load
+        window.addEventListener('load', initializePyodide);
+    </script>
+</body>
+</html>
+```
+
+4. Key Benefits of Fileless WebGL System:
+
+🚫 What You DON'T Need:
+
+· No file writes to disk
+· No JSON/CSV exports (unless user explicitly requests)
+· No temporary files
+· No server-side storage
+
+✅ What You DO Get:
+
+1. Real-time streaming of results via WebSocket
+2. In-memory data storage during session
+3. Direct WebGL visualization without intermediate files
+4. Live updating UI with charts and metrics
+5. Optional export only when user clicks "Save"
+
+Performance Advantages:
+
+```javascript
+// Memory-efficient waveform streaming
+class WaveformStreamer {
+    constructor(websocketUrl) {
+        this.ws = new WebSocket(websocketUrl);
+        this.waveformBuffer = new Float32Array(100000); // Allocate once
+        this.index = 0;
+    }
+    
+    streamData(data) {
+        // Direct to GPU via Three.js (no file)
+        this.geometry.attributes.position.array.set(data);
+        this.geometry.attributes.position.needsUpdate = true;
+    }
+}
+```
+
+5. Deployment Options:
+
+- Single HTML File:
+
+index.html
+
+```html
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Echo Detector - No Files Needed</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script>
+        class InMemoryEchoDetector {
+            constructor() {
+                this.results = {};
+                this.waveforms = [];
+            }
+            
+            simulate() {
+                // Generate fake data in memory
+                this.results = {
+                    snr: 12.5,
+                    mass: 30,
+                    confidence: 87.5,
+                    candidates: 3
+                };
+                
+                // Generate waveform points
+                this.waveforms = [];
+                for(let i = 0; i < 3; i++) {
+                    const points = [];
+                    for(let t = 0; t < 100; t++) {
+                        points.push({
+                            x: t * 0.1,
+                            y: Math.sin(t * 0.3 + i) * Math.exp(-t * 0.05),
+                            z: i * 2
+                        });
+                    }
+                    this.waveforms.push(points);
+                }
+                
+                return this.results;
+            }
+            
+            visualize(containerId) {
+                const container = document.getElementById(containerId);
+                const scene = new THREE.Scene();
+                const camera = new THREE.PerspectiveCamera(75, 1, 0.1, 1000);
+                const renderer = new THREE.WebGLRenderer();
+                
+                renderer.setSize(400, 300);
+                container.innerHTML = '';
+                container.appendChild(renderer.domElement);
+                
+                // Add waveforms
+                this.waveforms.forEach(points => {
+                    const geometry = new THREE.BufferGeometry();
+                    const vertices = [];
+                    points.forEach(p => vertices.push(p.x, p.y, p.z));
+                    geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+                    
+                    const material = new THREE.LineBasicMaterial({ color: 0x00ff00 });
+                    const line = new THREE.Line(geometry, material);
+                    scene.add(line);
+                });
+                
+                camera.position.z = 10;
+                
+                function animate() {
+                    requestAnimationFrame(animate);
+                    renderer.render(scene, camera);
+                }
+                animate();
+            }
+        }
+        
+        let detector;
+        
+        window.onload = function() {
+            detector = new InMemoryEchoDetector();
+        };
+        
+        function runAndShow() {
+            const results = detector.simulate();
+            
+            // Show in UI
+            document.getElementById('results').innerHTML = `
+                <h3>Results (No Files Generated)</h3>
+                <p>SNR: ${results.snr}</p>
+                <p>Mass: ${results.mass} M☉</p>
+                <p>Confidence: ${results.confidence}%</p>
+                <p>Candidates: ${results.candidates}</p>
+            `;
+            
+            // Visualize
+            detector.visualize('visualization');
+        }
+    </script>
+</head>
+<body>
+    <h1>Echo Detection - Fileless Demo</h1>
+    <button onclick="runAndShow()">Run & Show Results</button>
+    <div id="results"></div>
+    <div id="visualization" style="width:400px; height:300px;"></div>
+</body>
+</html>
+```
+
