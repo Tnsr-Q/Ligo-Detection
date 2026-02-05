@@ -154,9 +154,9 @@ GW150914-analysis/
 │
 ├── .gitignore                       
 ├── README.md                      # Project documentation
-├── LICENSE                        #  License
-├── environment.yml                #environment
-├── requirements.txt                 requirements
+├── LICENSE                        # License
+├── environment.yml                # Environment config
+├── requirements.txt               # Python requirements
 │
 ├── echo_search/                      
 │   ├── __init__.py                
@@ -167,12 +167,12 @@ GW150914-analysis/
 │   │   ├── parametric_rs.py
 │   │   └── echo_detectability.py
 │   │
-│   ├── detectors/                 LIGO/Virgo specifics
+│   ├── detectors/                 # LIGO/Virgo specifics
 │   │   ├── __init__.py
 │   │   ├── noise_psd.py         
 │   │   └── antenna_pattern.py     
 │   │
-│   ├── templates/                  generation
+│   ├── templates/                 # Template generation
 │   │   ├── __init__.py
 │   │   ├── waveform_generator.py
 │   │   └── template_bank.py
