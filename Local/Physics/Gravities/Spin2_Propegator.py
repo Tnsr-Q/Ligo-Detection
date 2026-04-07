@@ -92,7 +92,6 @@ class QuadraticGravityPropagator:
 Your derivation is essentially correct, but let me refine with proper QFT normalization:
 
 ```python
-import sympy as sp
 
 class ParityContourConnection:
     def __init__(self, m_g=2.15, m_P=1.0):
