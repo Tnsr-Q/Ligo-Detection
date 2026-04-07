@@ -227,7 +227,9 @@ class LISAGhostObservables:
         return {
             'theta_rad': theta,
             'epsilon': epsilon,
-            'N_eff_pred': theta/(np.pi/5.6),
+            # 5.6 is an empirical N_eff scaling factor relating theta to the effective
+            # number of channels; see model documentation for its calibration.
+            'N_eff_pred': theta * 5.6 / np.pi,
             'echo_delay_s': self.M * 4.92e-6 * np.log(self.M_ratio)
         }
     
