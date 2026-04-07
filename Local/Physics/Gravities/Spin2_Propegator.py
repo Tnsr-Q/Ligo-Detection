@@ -74,14 +74,10 @@ class QuadraticGravityPropagator:
     def resonance_spectrum(self, omega_range):
         """Compute spectral function showing Merlin resonance"""
         omegas = np.linspace(omega_range[0], omega_range[1], 500)
-        spectral_density = []
-        
-        for omega in omegas:
-            # Retarded propagator: ω → ω + iε
-            p_sq = (omega + 1e-6j)**2
-            prop = self.propagator_spin2(p_sq)
-            spectral_density.append(-2 * np.imag(prop))
-            
+        # Retarded propagator: ω → ω + iε (vectorized over omegas)
+        p_sq = (omegas + 1e-6j) ** 2
+        prop = self.propagator_spin2(p_sq)
+        spectral_density = -2 * np.imag(prop)
         return omegas, spectral_density
 ```
 
