@@ -4,7 +4,7 @@ Excellent upgrade! The spin-2 projector is crucial because the Merlin mode is sp
 
 ```python
 import numpy as np
-from scipy import integrate, special
+from scipy import integrate
 import sympy as sp
 
 class QuadraticGravityPropagator:
